@@ -39,7 +39,7 @@ const corsOptions = {
         "http://192.168.0.107:5173",
         "http://192.168.0.106:5173",
         "https://college-lms-frontend.vercel.app",
-        "https://collegese-lms-backend.onrender.com"
+        
     ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
