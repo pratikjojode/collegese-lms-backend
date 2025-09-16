@@ -38,6 +38,8 @@ const corsOptions = {
         "http://192.168.77.1:5173",
         "http://192.168.0.107:5173",
         "http://192.168.0.106:5173",
+        "https://college-lms-frontend.vercel.app",
+        "https://collegese-lms-backend.onrender.com"
     ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -65,14 +67,14 @@ app.get("/", (req, res) => {
     res.status(200).json(welcomeMessage);
 });
 
-// Auth routes should be exempt from the middleware, as they are for unauthenticated users.
+
 app.use('/api/v1/auth', authRouter);
 
-// All protected routes should have authMiddleware and maintenanceModeMiddleware applied to them.
+
 app.use(authMiddleware);
 app.use(maintenanceModeMiddleware);
 
-// All protected routers are placed here, after the global middlewares.
+
 app.use('/api/v1/superadmin', superAdminRouter);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/admin', adminRouter);
