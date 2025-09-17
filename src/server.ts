@@ -39,13 +39,14 @@ const corsOptions = {
         "http://192.168.0.107:5173",
         "http://192.168.0.106:5173",
         "https://college-lms-frontend.vercel.app",
-        "https://collegese-lms-backend.onrender.com"
-        
+        "https://your-exact-vercel-domain.vercel.app",
     ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
+    allowedHeaders: ["Content-Type", "Authorization", "Cookie", "x-requested-with"],
+    optionsSuccessStatus: 200,
 };
+
 
 app.use(express.json());
 app.use(cors(corsOptions));
@@ -88,6 +89,8 @@ app.use('/api/v1/assessments', assessmentRouter);
 app.use('/api/v1/stats', statsRouter);
 app.use("/api/v1/certificates", certificateRouter);
 app.use("/api/v1/exams", ExamRouter);
+
+
 
 const PORT = process.env.PORT || 5000;
 const server = http.createServer(app);
