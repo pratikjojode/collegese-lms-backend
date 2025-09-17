@@ -59,13 +59,13 @@ export const loginController = async (req: Request, res: Response) => {
     });
 
    
-    res.cookie('auth_token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      expires: new Date(Date.now() + 60 * 60 * 1000),
-      path: '/', 
-    });
+   res.cookie('auth_token', token, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax', 
+  expires: new Date(Date.now() + 60 * 60 * 1000),
+  path: '/',
+});
 
    
     res.status(200).json({
