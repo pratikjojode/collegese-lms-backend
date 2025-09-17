@@ -3,9 +3,12 @@ import chalk from "chalk";
 
 const ICE_SERVER_CONFIG = {
   iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
     {
-      urls: "stun:stun.l.google.com:19302"
-    },
+      urls: "relay1.expressturn.com:3480",
+      username: "efPU52K4SLOQ34W2QY",
+      credential: "1TJPNFxHKXrZfelz"
+    }
   ]
 };
 
