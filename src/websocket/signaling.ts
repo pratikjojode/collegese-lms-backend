@@ -5,12 +5,13 @@ const ICE_SERVER_CONFIG = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     {
-      urls: "relay1.expressturn.com:3480",
-      username: "efPU52K4SLOQ34W2QY",
-      credential: "1TJPNFxHKXrZfelz"
+      urls: "turn:relay1.expressturn.com:3478",  
+      username: "000000002073459740",
+      credential: "2OBO78ET1NTRE0/RJpKJiGovpR4="
     }
   ]
 };
+
 
 interface JoinRoomPayload {
   roomId: string;
