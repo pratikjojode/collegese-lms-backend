@@ -436,6 +436,36 @@ export const initWebRTCSignaling = (io: Server) => {
       console.log(chalk.red(`🚨 Socket error for ${socket.data.userId} (${socket.id}):`, error));
     });
 
+
+    socket.on("remove-participant", ({ roomId, participantId, removedBy }) => {
+  try {
+    console.log(`${removedBy} removing participant ${participantId} from room ${roomId}`);
+    
+    // Remove from room
+    const targetSocket = io.sockets.sockets.get(participantId);
+    if (targetSocket) {
+      targetSocket.leave(roomId);
+      targetSocket.emit("removed-from-lecture", { removedBy });
+      targetSocket.disconnect(true);
+    }
+    
+    // Notify other participants
+    socket.to(roomId).emit("participant-removed", {
+      participantId,
+      removedBy
+    });
+    
+    // Update room state
+    const roomUserMap = getRoomUsers(roomId);
+    const userToRemove = Array.from(roomUserMap.values()).find(u => u.socketId === participantId);
+    if (userToRemove) {
+      removeUserFromRoom(roomId, userToRemove.userId);
+    }
+    
+  } catch (error) {
+    console.error("Error removing participant:", error);
+  }
+});
     socket.on("force-reconnect", ({ roomId }: { roomId: string }) => {
       try {
         broadcastToRoom(roomId, "force-peer-reconnect", {
@@ -490,3 +520,4 @@ export const initWebRTCSignaling = (io: Server) => {
 
   console.log(chalk.green("🚀 WebRTC signaling server initialized"));
 };
+
