@@ -1,7 +1,7 @@
   import { Request, Response } from "express";
   import { PrismaClient } from "generated/prisma";
 import { ObjectId } from 'mongodb';
-import { sendExamResultEmail } from "services/email.service";
+import { sendExamMail, sendExamResultEmail } from "services/email.service";
 import { generatePresignedViewUrl, uploadPrivateFileToS3 } from "utils/s3.utils";
   const prisma = new PrismaClient();
 
@@ -19,29 +19,38 @@ import { generatePresignedViewUrl, uploadPrivateFileToS3 } from "utils/s3.utils"
   }
 };
 
-  export const createExam = async (req: Request, res: Response) => {
+export const createExam = async (req: Request, res: Response) => {
     try {
-      const { title, description, durationMins, totalMarks, passingMarks, isFinalExam, courseId } = req.body;
-      
-      if (!title || !durationMins || !totalMarks || !passingMarks || !courseId) {
-        return res.status(400).json({ error: "Missing required fields" });
-      }
-
-      const course = await prisma.course.findUnique({ where: { id: courseId } });
-      if (!course) {
-        return res.status(404).json({ error: "Course not found" });
-      }
-
-      const exam = await prisma.exam.create({
-        data: { title, description, durationMins, totalMarks, passingMarks, isFinalExam, courseId },
-        include: { course: true }
-      });
-      
-      res.status(201).json(exam);
+        const { title, description, durationMins, totalMarks, passingMarks, isFinalExam, courseId } = req.body;
+        const userEmail = req.user?.email;
+        if (!userEmail) {
+            return res.status(401).json({ error: "Unauthorized: User email not found." });
+        }
+        if (!title || !durationMins || !totalMarks || !passingMarks || !courseId) {
+            return res.status(400).json({ error: "Missing required fields" });
+        }
+        const course = await prisma.course.findUnique({ where: { id: courseId } });
+        if (!course) {
+            return res.status(404).json({ error: "Course not found" });
+        }
+        const exam = await prisma.exam.create({
+            data: { title, description, durationMins, totalMarks, passingMarks, isFinalExam, courseId },
+            include: { course: true }
+        });
+        const enrollments = await prisma.courseEnrollment.findMany({
+            where: { courseId: courseId },
+            include: { user: { select: { email: true } } }
+        });
+        for (const enrollment of enrollments) {
+            if (enrollment.user && enrollment.user.email) {
+                sendExamMail(exam, enrollment.user.email);
+            }
+        }
+        res.status(201).json(exam);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+        res.status(500).json({ error: err.message });
     }
-  };
+};
 
   export const getExamsByCourse = async (req: Request, res: Response) => {
     try {

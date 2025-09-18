@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import prisma from '../config/db';
 import { Role,SystemSetting} from '../generated/prisma';
 import { NotificationService } from '../services/notification.service';
+import { sendMaintenanceModeEmail, sendWhitelistUpdateEmail } from 'services/email.service';
+
 
 export const promoteUserController = async (req: Request, res: Response) => {
     try {
@@ -164,51 +166,102 @@ export const getAllExamScores = async (req: Request, res: Response) => {
 };
 
 export const toggleMaintenanceMode = async (req: Request, res: Response) => {
-  try {
-    const { isMaintenanceMode } = req.body;
-    if (typeof isMaintenanceMode !== 'boolean') {
-      return res.status(400).json({ message: 'Invalid value for maintenance mode.' });
+    try {
+        const { isMaintenanceMode, reason } = req.body;
+        if (typeof isMaintenanceMode !== 'boolean') {
+            return res.status(400).json({ message: 'Invalid value for maintenance mode.' });
+        }
+        const updatedSetting = await prisma.systemSetting.upsert({
+            where: { key: 'isMaintenanceMode' },
+            update: { value: String(isMaintenanceMode) },
+            create: { key: 'isMaintenanceMode', value: String(isMaintenanceMode) },
+        });
+        const usersToNotify = await prisma.user.findMany({
+            where: {
+                OR: [
+                    { role: 'ADMIN' },
+                    { role: 'SUPER_ADMIN' },
+                    { role: 'TEACHER' },
+                    { role: 'STUDENT' },
+                ],
+            },
+            select: {
+                email: true,
+                name: true,
+                role: true, 
+            },
+        });
+        const emailPromises = usersToNotify.map(user => {
+            if (user.email) {
+                return sendMaintenanceModeEmail(
+                    user.email,
+                    user.name || 'User',
+                    user.role, 
+                    isMaintenanceMode,
+                    reason || 'No reason provided.'
+                );
+            }
+            return Promise.resolve();
+        });
+        await Promise.all(emailPromises);
+        res.status(200).json({
+            success: true,
+            message: `Maintenance mode is now ${isMaintenanceMode ? 'enabled' : 'disabled'}.`,
+            setting: updatedSetting,
+        });
+    } catch (error) {
+        console.error('Toggle maintenance error:', error);
+        res.status(500).json({ message: 'Failed to update maintenance mode.' });
     }
-
-    const updatedSetting = await prisma.systemSetting.upsert({
-      where: { key: 'isMaintenanceMode' },
-      update: { value: String(isMaintenanceMode) },
-      create: { key: 'isMaintenanceMode', value: String(isMaintenanceMode) },
-    });
-
-    res.status(200).json({
-      success: true,
-      message: `Maintenance mode is now ${isMaintenanceMode ? 'enabled' : 'disabled'}.`,
-      setting: updatedSetting,
-    });
-  } catch (error) {
-    console.error('Toggle maintenance error:', error);
-    res.status(500).json({ message: 'Failed to update maintenance mode.' });
-  }
 };
 
 export const updateMaintenanceWhitelist = async (req: Request, res: Response) => {
-  try {
-    const { userIds } = req.body;
-    if (!Array.isArray(userIds)) {
-      return res.status(400).json({
-        message: "Invalid value for whitelist. Must be an array of user IDs."
-      });
+    try {
+        const { userIds } = req.body;
+        if (!Array.isArray(userIds)) {
+            return res.status(400).json({
+                message: "Invalid value for whitelist. Must be an array of user IDs."
+            });
+        }
+        const updatedSetting = await prisma.systemSetting.upsert({
+            where: { key: "maintenanceAllowedUsers" },
+            update: { value: JSON.stringify(userIds) },
+            create: { key: "maintenanceAllowedUsers", value: JSON.stringify(userIds) },
+        });
+        const whitelistedUsers = await prisma.user.findMany({
+            where: {
+                id: {
+                    in: userIds,
+                },
+            },
+            select: {
+                name: true,
+            },
+        });
+        const whitelistUserNames = whitelistedUsers.map(user => user.name);
+        const adminUsers = await prisma.user.findMany({
+            where: {
+                role: 'ADMIN',
+            },
+            select: {
+                email: true,
+                name: true,
+            },
+        });
+        const emailPromises = adminUsers.map(admin => {
+            if (admin.email) {
+                return sendWhitelistUpdateEmail(admin.email, admin.name || 'Administrator', whitelistUserNames);
+            }
+            return Promise.resolve();
+        });
+        await Promise.all(emailPromises);
+        res.status(200).json({
+            success: true,
+            message: "Whitelist updated successfully.",
+            setting: updatedSetting,
+        });
+    } catch (error) {
+        console.error('Update whitelist error:', error);
+        res.status(500).json({ message: "Failed to update whitelist." });
     }
-
-    const updatedSetting = await prisma.systemSetting.upsert({
-      where: { key: "maintenanceAllowedUsers" },
-      update: { value: JSON.stringify(userIds) },
-      create: { key: "maintenanceAllowedUsers", value: JSON.stringify(userIds) },
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Whitelist updated successfully.",
-      setting: updatedSetting,
-    });
-  } catch (error) {
-    console.error('Update whitelist error:', error);
-    res.status(500).json({ message: "Failed to update whitelist." });
-  }
 };

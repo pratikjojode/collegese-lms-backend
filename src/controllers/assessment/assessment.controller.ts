@@ -3,6 +3,7 @@ import prisma from '../../config/db';
 import { generatePresignedUploadUrl } from '../../utils/s3.utils';
 import { generateSignedCloudFrontUrl } from '../../utils/cloudfront.utils';
 import { NotificationService } from '../../services/notification.service';
+import { sendAssessmentEmail } from 'services/email.service';
 
 export const createAssessmentController = async (req: Request, res: Response) => {
     try {
@@ -28,14 +29,35 @@ export const createAssessmentController = async (req: Request, res: Response) =>
             `A new assessment "${title}" has been published in the course.`,
             { assessmentId: newAssessment.id, courseId },
             {
-                notifyStudents: true,       
-                notifyTeachers: true,       
-                notifyAssistants: true,   
-                notifyAdmins: false,        
-                notifySuperAdmins: false,   
+                notifyStudents: true,
+                notifyTeachers: true,
+                notifyAssistants: true,
+                notifyAdmins: false,
+                notifySuperAdmins: false,
             }
         );
-
+        const enrolledStudents = await prisma.courseEnrollment.findMany({
+            where: { courseId: courseId },
+            include: {
+                user: {
+                    select: {
+                        email: true,
+                        name: true,
+                    },
+                },
+            },
+        });
+        const emailPromises = enrolledStudents.map(enrollment => {
+            if (enrollment.user && enrollment.user.email) {
+                return sendAssessmentEmail(
+                    enrollment.user.email,
+                    enrollment.user.name || 'User',
+                    newAssessment
+                );
+            }
+            return Promise.resolve();
+        });
+        await Promise.all(emailPromises);
         res.status(201).json({ success: true, assessment: newAssessment });
     } catch (error) {
         res.status(500).json({ success: false, message: "Failed to create assessment." });

@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import prisma from '../../config/db';
 import { QuestionType, AnswerRevealPolicy, Role, NotificationType } from '../../generated/prisma';
 import { NotificationService } from '../../services/notification.service';
+import { sendQuizCreatedEmail } from 'services/email.service';
 
 
 export const createQuizController = async (req: Request, res: Response) => {
@@ -23,8 +24,37 @@ export const createQuizController = async (req: Request, res: Response) => {
             },
             include: { createdBy: { select: { name: true, email: true } } },
         });
+
+       
+        const enrolledStudents = await prisma.courseEnrollment.findMany({
+            where: { courseId: courseId },
+            include: {
+                user: {
+                    select: {
+                        email: true,
+                        name: true,
+                    },
+                },
+            },
+        });
+
+       
+        const emailPromises = enrolledStudents.map(enrollment => {
+            if (enrollment.user && enrollment.user.email) {
+                return sendQuizCreatedEmail(
+                    enrollment.user.email,
+                    enrollment.user.name || 'Student',
+                    newQuiz
+                );
+            }
+            return Promise.resolve(); 
+        });
+
+        await Promise.all(emailPromises);
+
         res.status(201).json({ success: true, message: 'Quiz created successfully.', quiz: newQuiz });
     } catch (error) {
+        console.error(error);
         res.status(500).json({ success: false, message: 'Failed to create quiz.' });
     }
 };

@@ -2,11 +2,13 @@ import { Request, Response } from "express";
 import prisma from "../../config/db";
 import { v4 as uuidv4 } from "uuid";
 import { NotificationService } from "../../services/notification.service";
+import { sendLiveLectureScheduledEmail } from "services/email.service";
 
 export const createLiveLecture = async (req: Request, res: Response) => {
   try {
     const { title, courseId, teacherId, startTime, endTime } = req.body;
     const roomId = uuidv4();
+
     const lecture = await prisma.liveLecture.create({
       data: {
         title,
@@ -21,24 +23,50 @@ export const createLiveLecture = async (req: Request, res: Response) => {
     if (courseId) {
       await NotificationService.notifyAllCourseStakeholders(
         courseId,
-        'LIVE_LECTURE_SCHEDULED',
-        'New Live Lecture Scheduled',
-        `A new live lecture "${title}" has been scheduled. Starts at ${new Date(startTime).toLocaleString()}.`,
+        "LIVE_LECTURE_SCHEDULED",
+        "New Live Lecture Scheduled",
+        `A new live lecture "${title}" has been scheduled. Starts at ${new Date(
+          startTime
+        ).toLocaleString()}.`,
         {
           lectureId: lecture.id,
           courseId,
           startTime,
           endTime,
-          roomId: lecture.roomId
+          roomId: lecture.roomId,
         },
         {
-          notifyStudents: true,       
-          notifyTeachers: true,       
-          notifyAssistants: true,     
-          notifyAdmins: false,        
-          notifySuperAdmins: false,    
+          notifyStudents: true,
+          notifyTeachers: true,
+          notifyAssistants: true,
+          notifyAdmins: false,
+          notifySuperAdmins: false,
         }
       );
+
+      prisma.user
+        .findMany({
+          where: { enrollments: { some: { courseId } } },
+          select: { email: true, name: true },
+        })
+        .then((users) =>
+          Promise.allSettled(
+            users.map((u) =>
+              sendLiveLectureScheduledEmail(u.email, u.name || "User", lecture)
+            )
+          )
+        )
+        .then((results) => {
+          const failed = results.filter((r) => r.status === "rejected");
+          if (failed.length > 0) {
+            console.warn(
+              `Failed to send ${failed.length} lecture emails for courseId ${courseId}`
+            );
+          }
+        })
+        .catch((err) => {
+          console.error("Email sending process failed:", err);
+        });
     }
 
     res.status(201).json({ success: true, lecture });
@@ -47,6 +75,7 @@ export const createLiveLecture = async (req: Request, res: Response) => {
     res.status(500).json({ success: false, message: "Server Error" });
   }
 };
+
 
 export const getLiveLecturesByCourse = async (req: Request, res: Response) => {
   try {
