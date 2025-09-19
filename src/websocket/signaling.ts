@@ -12,7 +12,6 @@ const ICE_SERVER_CONFIG = {
   ]
 };
 
-
 interface JoinRoomPayload {
   roomId: string;
   userId: string;
@@ -56,7 +55,7 @@ export const initWebRTCSignaling = (io: Server) => {
     users.delete(userId);
     if (users.size === 0) {
       roomUsers.delete(roomId);
-      console.log(chalk.gray(`🗑️  Room ${roomId} deleted (empty)`));
+      console.log(chalk.gray(`Room ${roomId} deleted (empty)`));
     }
   };
 
@@ -65,7 +64,7 @@ export const initWebRTCSignaling = (io: Server) => {
       const userState = users.get(userId);
       if (userState && userState.socketId !== currentSocketId) {
         users.delete(userId);
-        console.log(chalk.yellow(`🧹 Cleaned up old user state for ${userId} in room ${roomId}`));
+        console.log(chalk.yellow(`Cleaned up old user state for ${userId} in room ${roomId}`));
       }
     });
 
@@ -73,7 +72,7 @@ export const initWebRTCSignaling = (io: Server) => {
     if (existingSocketId && existingSocketId !== currentSocketId) {
       const existingSocket = io.sockets.sockets.get(existingSocketId);
       if (existingSocket) {
-        console.log(chalk.yellow(`🔄 Disconnecting existing connection for user ${userId}`));
+        console.log(chalk.yellow(`Disconnecting existing connection for user ${userId}`));
         existingSocket.disconnect(true);
       }
     }
@@ -98,7 +97,7 @@ export const initWebRTCSignaling = (io: Server) => {
     try {
       const targetSocket = io.sockets.sockets.get(targetSocketId);
       if (!targetSocket) {
-        console.warn(chalk.red(`❌ Target socket ${targetSocketId} not found for event ${event}`));
+        console.warn(chalk.red(`Target socket ${targetSocketId} not found for event ${event}`));
         fromSocket.emit("signal-error", {
           message: "Target user not connected",
           to: targetSocketId,
@@ -112,7 +111,7 @@ export const initWebRTCSignaling = (io: Server) => {
       const targetRoomId = targetSocket.data.roomId;
 
       if (fromRoomId && targetRoomId && fromRoomId !== targetRoomId) {
-        console.warn(chalk.yellow(`⚠️  Room mismatch: ${fromSocket.id} (${fromRoomId}) -> ${targetSocketId} (${targetRoomId})`));
+        console.warn(chalk.yellow(`Room mismatch: ${fromSocket.id} (${fromRoomId}) -> ${targetSocketId} (${targetRoomId})`));
         return false;
       }
 
@@ -124,7 +123,7 @@ export const initWebRTCSignaling = (io: Server) => {
 
       return true;
     } catch (err) {
-      console.error(chalk.red(`❌ Error emitting ${event} to ${targetSocketId}:`, err));
+      console.error(chalk.red(`Error emitting ${event} to ${targetSocketId}:`, err));
       fromSocket.emit("signal-error", {
         message: "Failed to deliver signal",
         to: targetSocketId,
@@ -135,15 +134,33 @@ export const initWebRTCSignaling = (io: Server) => {
     }
   };
 
+  const notifyOtherUsersToCreateOffer = (roomId: string, newUserSocketId: string, newUserId: string, newUserName: string) => {
+    const roomSockets = io.sockets.adapter.rooms.get(roomId);
+    if (!roomSockets) return;
+
+    roomSockets.forEach(socketId => {
+      if (socketId !== newUserSocketId) {
+        const socket = io.sockets.sockets.get(socketId);
+        if (socket) {
+          socket.emit("create-offer-for-new-user", {
+            newUserSocketId,
+            newUserId,
+            newUserName
+          });
+        }
+      }
+    });
+  };
+
   io.on("connection", (socket: Socket) => {
-    console.log(chalk.green(`✅ Client connected: ${socket.id}`));
-    console.log(chalk.blue(`📍 Origin: ${socket.handshake.headers.origin}`));
+    console.log(chalk.green(`Client connected: ${socket.id}`));
+    console.log(chalk.blue(`Origin: ${socket.handshake.headers.origin}`));
 
     socket.on("join-room", async (payload: JoinRoomPayload) => {
       try {
         const { roomId, userId, userName = "User", role = "student" } = payload;
         
-        console.log(chalk.blue(`👤 User ${userId} (${userName}) joining room ${roomId} as ${role}`));
+        console.log(chalk.blue(`User ${userId} (${userName}) joining room ${roomId} as ${role}`));
 
         socket.data.userId = userId;
         socket.data.userName = userName;
@@ -181,21 +198,38 @@ export const initWebRTCSignaling = (io: Server) => {
         socket.emit("room-joined", {
           roomId,
           participantCount: roomUserMap.size,
-          participants: Array.from(roomUserMap.values()),
+          participants: existingParticipants,
           iceServers: ICE_SERVER_CONFIG.iceServers
         });
 
-        console.log(chalk.green(`✅ ${role} ${userId} (${userName}) joined room ${roomId}`));
-        console.log(chalk.blue(`👥 Room ${roomId} now has ${roomUserMap.size} participants`));
+        setTimeout(() => {
+          notifyOtherUsersToCreateOffer(roomId, socket.id, userId, userName);
+        }, 1000);
 
-        console.log(chalk.cyan(`📋 Current participants in ${roomId}:`));
+        console.log(chalk.green(`${role} ${userId} (${userName}) joined room ${roomId}`));
+        console.log(chalk.blue(`Room ${roomId} now has ${roomUserMap.size} participants`));
+
+        console.log(chalk.cyan(`Current participants in ${roomId}:`));
         roomUserMap.forEach((user) => {
           console.log(chalk.cyan(`   - ${user.role} ${user.userName} (${user.userId}) [${user.socketId}]`));
         });
 
       } catch (error) {
-        console.error(chalk.red(`❌ Error in join-room for ${payload.roomId}:`, error));
+        console.error(chalk.red(`Error in join-room for ${payload.roomId}:`, error));
         socket.emit("error", { message: "Failed to join room" });
+      }
+    });
+
+    socket.on("create-offer-for-new-user", async ({ newUserSocketId, newUserId, newUserName }) => {
+      try {
+        console.log(`${socket.id} creating offer for new user ${newUserSocketId}`);
+        socket.emit("initiate-call", {
+          targetSocketId: newUserSocketId,
+          targetUserId: newUserId,
+          targetUserName: newUserName
+        });
+      } catch (error) {
+        console.error("Error in create-offer-for-new-user:", error);
       }
     });
 
@@ -204,7 +238,7 @@ export const initWebRTCSignaling = (io: Server) => {
         const userIdToRemove = userId || socket.data.userId;
         const userName = socket.data.userName || "User";
         
-        console.log(chalk.yellow(`👋 User ${userIdToRemove} (${userName}) leaving room ${roomId}`));
+        console.log(chalk.yellow(`User ${userIdToRemove} (${userName}) leaving room ${roomId}`));
 
         socket.leave(roomId);
         
@@ -224,46 +258,24 @@ export const initWebRTCSignaling = (io: Server) => {
         });
 
       } catch (error) {
-        console.error(chalk.red(`❌ Error leaving room:`, error));
+        console.error(chalk.red(`Error leaving room:`, error));
       }
     });
 
-    
-socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isSharing: boolean; userId?: string }) => {
-  try {
-    const userIdToUpdate = userId || socket.data.userId;
-    const roomUserMap = getRoomUsers(roomId);
-    const userState = roomUserMap.get(userIdToUpdate);
-    
-    if (userState) {
-      userState.isScreenSharing = isSharing;
-      console.log(chalk.bgBlue(`${userState.userName} ${isSharing ? 'started' : 'stopped'} screen sharing in ${roomId}`));
-    }
-
-    broadcastToRoom(roomId, "user-screen-share-toggle", {
-      socketId: socket.id,
-      userId: userIdToUpdate,
-      isSharing: isSharing
-    }, socket.id);
-
-  } catch (error) {
-    console.error(chalk.red(`Error handling screen share toggle:`, error));
-  }
-});
     socket.on("offer", (data: SignalingMessage) => {
       try {
         const { to, offer } = data;
         if (!to || !offer) {
-          console.warn(chalk.yellow(`⚠️  Invalid offer from ${socket.id}`));
+          console.warn(chalk.yellow(`Invalid offer from ${socket.id}`));
           return;
         }
 
         const success = safeEmitTo(socket, to, "offer", { offer });
         if (success) {
-          console.log(chalk.blue(`📞 Offer: ${socket.data.userId || socket.id} → ${to}`));
+          console.log(chalk.blue(`Offer: ${socket.data.userId || socket.id} → ${to}`));
         }
       } catch (error) {
-        console.error(chalk.red(`❌ Error handling offer:`, error));
+        console.error(chalk.red(`Error handling offer:`, error));
       }
     });
 
@@ -271,16 +283,16 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
       try {
         const { to, answer } = data;
         if (!to || !answer) {
-          console.warn(chalk.yellow(`⚠️  Invalid answer from ${socket.id}`));
+          console.warn(chalk.yellow(`Invalid answer from ${socket.id}`));
           return;
         }
 
         const success = safeEmitTo(socket, to, "answer", { answer });
         if (success) {
-          console.log(chalk.green(`✅ Answer: ${socket.data.userId || socket.id} → ${to}`));
+          console.log(chalk.green(`Answer: ${socket.data.userId || socket.id} → ${to}`));
         }
       } catch (error) {
-        console.error(chalk.red(`❌ Error handling answer:`, error));
+        console.error(chalk.red(`Error handling answer:`, error));
       }
     });
 
@@ -288,16 +300,16 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
       try {
         const { to, candidate } = data;
         if (!to || !candidate) {
-          console.warn(chalk.yellow(`⚠️  Invalid ICE candidate from ${socket.id}`));
+          console.warn(chalk.yellow(`Invalid ICE candidate from ${socket.id}`));
           return;
         }
 
         const success = safeEmitTo(socket, to, "ice-candidate", { candidate });
         if (success) {
-          console.log(chalk.cyan(`🧊 ICE: ${socket.data.userId || socket.id} → ${to}`));
+          console.log(chalk.cyan(`ICE: ${socket.data.userId || socket.id} → ${to}`));
         }
       } catch (error) {
-        console.error(chalk.red(`❌ Error handling ICE candidate:`, error));
+        console.error(chalk.red(`Error handling ICE candidate:`, error));
       }
     });
 
@@ -309,7 +321,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         
         if (userState) {
           userState.isMuted = isMuted;
-          console.log(chalk.magenta(`🎤 ${userState.userName} ${isMuted ? 'muted' : 'unmuted'} audio in ${roomId}`));
+          console.log(chalk.magenta(`${userState.userName} ${isMuted ? 'muted' : 'unmuted'} audio in ${roomId}`));
         }
 
         broadcastToRoom(roomId, "user-toggle-audio", {
@@ -319,7 +331,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         }, socket.id);
 
       } catch (error) {
-        console.error(chalk.red(`❌ Error handling audio toggle:`, error));
+        console.error(chalk.red(`Error handling audio toggle:`, error));
       }
     });
 
@@ -331,7 +343,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         
         if (userState) {
           userState.isVideoOff = isVideoOff;
-          console.log(chalk.blue(`📹 ${userState.userName} ${isVideoOff ? 'turned off' : 'turned on'} video in ${roomId}`));
+          console.log(chalk.blue(`${userState.userName} ${isVideoOff ? 'turned off' : 'turned on'} video in ${roomId}`));
         }
 
         broadcastToRoom(roomId, "user-toggle-video", {
@@ -341,7 +353,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         }, socket.id);
 
       } catch (error) {
-        console.error(chalk.red(`❌ Error handling video toggle:`, error));
+        console.error(chalk.red(`Error handling video toggle:`, error));
       }
     });
 
@@ -353,7 +365,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         
         if (userState) {
           userState.isScreenSharing = isScreenSharing;
-          console.log(chalk.bgBlue(`🖥️  ${userState.userName} ${isScreenSharing ? 'started' : 'stopped'} screen sharing in ${roomId}`));
+          console.log(chalk.bgBlue(`${userState.userName} ${isScreenSharing ? 'started' : 'stopped'} screen sharing in ${roomId}`));
         }
 
         broadcastToRoom(roomId, "user-screen-share-toggle", {
@@ -363,7 +375,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         }, socket.id);
 
       } catch (error) {
-        console.error(chalk.red(`❌ Error handling screen share toggle:`, error));
+        console.error(chalk.red(`Error handling screen share toggle:`, error));
       }
     });
 
@@ -372,7 +384,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         const roomSockets = io.sockets.adapter.rooms.get(roomId);
         const roomUserMap = getRoomUsers(roomId);
         
-        console.log(chalk.bgMagenta(`🐛 DEBUG - Room ${roomId}:`));
+        console.log(chalk.bgMagenta(`DEBUG - Room ${roomId}:`));
         console.log(chalk.bgMagenta(`   Socket.IO room size: ${roomSockets?.size || 0}`));
         console.log(chalk.bgMagenta(`   User state map size: ${roomUserMap.size}`));
         
@@ -414,7 +426,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         const userName = socket.data.userName || "User";
         const roomId = socket.data.roomId;
 
-        console.log(chalk.yellow(`🔌 User ${userId} (${userName}) disconnecting: ${reason}`));
+        console.log(chalk.yellow(`User ${userId} (${userName}) disconnecting: ${reason}`));
         
         if (roomId) {
           if (userId) {
@@ -440,7 +452,7 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
         }
 
       } catch (error) {
-        console.error(chalk.red(`❌ Error during disconnect cleanup:`, error));
+        console.error(chalk.red(`Error during disconnect cleanup:`, error));
       }
     });
 
@@ -448,46 +460,43 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
       try {
         const userId = socket.data.userId;
         const userName = socket.data.userName || "User";
-        console.log(chalk.yellow(`❌ Client disconnected: ${socket.id}, User: ${userId} (${userName}), Reason: ${reason}`));
+        console.log(chalk.yellow(`Client disconnected: ${socket.id}, User: ${userId} (${userName}), Reason: ${reason}`));
       } catch (error) {
-        console.error(chalk.red("❌ Error on disconnect:", error));
+        console.error(chalk.red("Error on disconnect:", error));
       }
     });
 
     socket.on("error", (error) => {
-      console.log(chalk.red(`🚨 Socket error for ${socket.data.userId} (${socket.id}):`, error));
+      console.log(chalk.red(`Socket error for ${socket.data.userId} (${socket.id}):`, error));
     });
-
 
     socket.on("remove-participant", ({ roomId, participantId, removedBy }) => {
-  try {
-    console.log(`${removedBy} removing participant ${participantId} from room ${roomId}`);
-    
-   
-    const targetSocket = io.sockets.sockets.get(participantId);
-    if (targetSocket) {
-      targetSocket.leave(roomId);
-      targetSocket.emit("removed-from-lecture", { removedBy });
-      targetSocket.disconnect(true);
-    }
-    
-  
-    socket.to(roomId).emit("participant-removed", {
-      participantId,
-      removedBy
+      try {
+        console.log(`${removedBy} removing participant ${participantId} from room ${roomId}`);
+        
+        const targetSocket = io.sockets.sockets.get(participantId);
+        if (targetSocket) {
+          targetSocket.leave(roomId);
+          targetSocket.emit("removed-from-lecture", { removedBy });
+          targetSocket.disconnect(true);
+        }
+        
+        socket.to(roomId).emit("participant-removed", {
+          participantId,
+          removedBy
+        });
+        
+        const roomUserMap = getRoomUsers(roomId);
+        const userToRemove = Array.from(roomUserMap.values()).find(u => u.socketId === participantId);
+        if (userToRemove) {
+          removeUserFromRoom(roomId, userToRemove.userId);
+        }
+        
+      } catch (error) {
+        console.error("Error removing participant:", error);
+      }
     });
-    
-  
-    const roomUserMap = getRoomUsers(roomId);
-    const userToRemove = Array.from(roomUserMap.values()).find(u => u.socketId === participantId);
-    if (userToRemove) {
-      removeUserFromRoom(roomId, userToRemove.userId);
-    }
-    
-  } catch (error) {
-    console.error("Error removing participant:", error);
-  }
-});
+
     socket.on("force-reconnect", ({ roomId }: { roomId: string }) => {
       try {
         broadcastToRoom(roomId, "force-peer-reconnect", {
@@ -495,9 +504,9 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
           userId: socket.data.userId
         }, socket.id);
         
-        console.log(chalk.magenta(`🔄 Force reconnect triggered by ${socket.data.userId} in room ${roomId}`));
+        console.log(chalk.magenta(`Force reconnect triggered by ${socket.data.userId} in room ${roomId}`));
       } catch (error) {
-        console.error(chalk.red(`❌ Error in force reconnect:`, error));
+        console.error(chalk.red(`Error in force reconnect:`, error));
       }
     });
   });
@@ -510,19 +519,19 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
       });
 
       if (activeRooms.length > 0) {
-        console.log(chalk.gray(`📊 Health Check - Active rooms: ${activeRooms.length}, User states: ${roomUsers.size}`));
+        console.log(chalk.gray(`Health Check - Active rooms: ${activeRooms.length}, User states: ${roomUsers.size}`));
         
         activeRooms.forEach(([roomId, sockets]) => {
           const userStates = roomUsers.get(roomId);
           if (sockets.size !== userStates?.size) {
-            console.log(chalk.yellow(`⚠️  Room ${roomId} inconsistency: ${sockets.size} sockets vs ${userStates?.size || 0} user states`));
+            console.log(chalk.yellow(`Room ${roomId} inconsistency: ${sockets.size} sockets vs ${userStates?.size || 0} user states`));
           }
         });
 
         roomUsers.forEach((users, roomId) => {
           if (users.size === 0) {
             roomUsers.delete(roomId);
-            console.log(chalk.gray(`🗑️  Cleaned up empty room: ${roomId}`));
+            console.log(chalk.gray(`Cleaned up empty room: ${roomId}`));
           }
         });
       }
@@ -532,14 +541,13 @@ socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isS
       const totalUsers = Array.from(roomUsers.values()).reduce((sum, users) => sum + users.size, 0);
 
       if (totalConnections > 0) {
-        console.log(chalk.gray(`📈 Stats: ${totalConnections} connections, ${totalRooms} rooms, ${totalUsers} active users`));
+        console.log(chalk.gray(`Stats: ${totalConnections} connections, ${totalRooms} rooms, ${totalUsers} active users`));
       }
 
     } catch (error) {
-      console.error(chalk.red("❌ Error in periodic cleanup:", error));
+      console.error(chalk.red("Error in periodic cleanup:", error));
     }
   }, 30000);
 
-  console.log(chalk.green("🚀 WebRTC signaling server initialized"));
+  console.log(chalk.green("WebRTC signaling server initialized"));
 };
-
