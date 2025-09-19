@@ -24,6 +24,7 @@ import { notificationRoutes } from "./routes/notification.routes";
 import { initCronJobs } from "./utils/cron.utils";
 import { maintenanceModeMiddleware } from "middlewares/adminAuth/maintenanceModeMiddleware";
 import { authMiddleware } from "middlewares/auth.middleware";
+import assistantStatsRouter from "routes/statisticsRoutes/assistantStatsRoutes";
 
 
 dotenv.config();
@@ -89,6 +90,7 @@ app.use('/api/v1/assessments', assessmentRouter);
 app.use('/api/v1/stats', statsRouter);
 app.use("/api/v1/certificates", certificateRouter);
 app.use("/api/v1/exams", ExamRouter);
+app.use("/api/v1/assistant/stats", assistantStatsRouter);
 
 
 

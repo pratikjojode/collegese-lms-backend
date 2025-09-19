@@ -3,7 +3,14 @@ import { Prisma, PrismaClient } from "generated/prisma";
 import { CourseService } from "../../services/course.service";
 
 const prisma = new PrismaClient();
-
+interface AuthenticatedRequest extends Request {
+  user: {
+    id: string;
+    email: string;
+    role: "STUDENT" | "ADMIN" | "TEACHER" | "ASSISTANT" | "SUPER_ADMIN";
+    forcePasswordChange: boolean;
+  };
+}
 export const getDashboardStats = async (req: Request, res: Response) => {
   try {
     const now = new Date();
@@ -767,5 +774,57 @@ export const getAdminCourseEnrollments = async (req: Request, res: Response) => 
   } catch (error) {
     console.error('Error fetching admin course enrollments:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch enrollments' });
+  }
+};
+
+export const getAssistantDashboard = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const assistantId = req.user.id;
+
+    const [assignedAssessments, pendingGrading, studentsSupported, upcomingLectures, notifications] =
+      await Promise.all([
+        prisma.assessmentAssistant.findMany({
+          where: { assistantId },
+          include: { assessment: { include: { course: true } } },
+        }),
+
+        prisma.assessmentSubmission.count({
+          where: { assessment: { assignedAssistants: { some: { assistantId } } }, status: "SUBMITTED", grade: null },
+        }),
+
+        prisma.courseEnrollment.findMany({
+          where: { course: { assessments: { some: { assignedAssistants: { some: { assistantId } } } } } },
+          include: { user: true, course: true },
+        }),
+
+        prisma.liveLecture.findMany({
+          where: { course: { assessments: { some: { assignedAssistants: { some: { assistantId } } } } }, startTime: { gte: new Date() } },
+          orderBy: { startTime: "asc" },
+          take: 5,
+          include: { course: true, teacher: true },
+        }),
+
+        prisma.notification.findMany({
+          where: { recipientId: assistantId },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        }),
+      ]);
+
+    res.json({
+      overview: {
+        totalAssignedAssessments: assignedAssessments.length,
+        pendingGrading,
+        totalStudentsSupported: studentsSupported.length,
+        upcomingLectures: upcomingLectures.length,
+      },
+      assignedAssessments,
+      studentsSupported,
+      upcomingLectures,
+      notifications,
+    });
+  } catch (error) {
+    console.error("Error fetching assistant dashboard:", error);
+    res.status(500).json({ error: "Failed to fetch assistant dashboard" });
   }
 };
