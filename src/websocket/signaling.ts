@@ -228,6 +228,28 @@ export const initWebRTCSignaling = (io: Server) => {
       }
     });
 
+    
+socket.on("toggle-screen", ({ roomId, isSharing, userId }: { roomId: string; isSharing: boolean; userId?: string }) => {
+  try {
+    const userIdToUpdate = userId || socket.data.userId;
+    const roomUserMap = getRoomUsers(roomId);
+    const userState = roomUserMap.get(userIdToUpdate);
+    
+    if (userState) {
+      userState.isScreenSharing = isSharing;
+      console.log(chalk.bgBlue(`${userState.userName} ${isSharing ? 'started' : 'stopped'} screen sharing in ${roomId}`));
+    }
+
+    broadcastToRoom(roomId, "user-screen-share-toggle", {
+      socketId: socket.id,
+      userId: userIdToUpdate,
+      isSharing: isSharing
+    }, socket.id);
+
+  } catch (error) {
+    console.error(chalk.red(`Error handling screen share toggle:`, error));
+  }
+});
     socket.on("offer", (data: SignalingMessage) => {
       try {
         const { to, offer } = data;
@@ -441,7 +463,7 @@ export const initWebRTCSignaling = (io: Server) => {
   try {
     console.log(`${removedBy} removing participant ${participantId} from room ${roomId}`);
     
-    // Remove from room
+   
     const targetSocket = io.sockets.sockets.get(participantId);
     if (targetSocket) {
       targetSocket.leave(roomId);
@@ -449,13 +471,13 @@ export const initWebRTCSignaling = (io: Server) => {
       targetSocket.disconnect(true);
     }
     
-    // Notify other participants
+  
     socket.to(roomId).emit("participant-removed", {
       participantId,
       removedBy
     });
     
-    // Update room state
+  
     const roomUserMap = getRoomUsers(roomId);
     const userToRemove = Array.from(roomUserMap.values()).find(u => u.socketId === participantId);
     if (userToRemove) {
