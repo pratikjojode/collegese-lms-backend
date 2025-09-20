@@ -288,7 +288,7 @@ export const getAssistantDashboard = async (req: AuthenticatedRequest, res: Resp
         totalStudentsSupported: studentsSupported.length,
         upcomingLectures: upcomingLectures.length,
         
-        // New comprehensive stats
+        
         completedGrading: completedGradingStats.length,
         overduePendingGrading,
         recentGradingActivity,
@@ -299,13 +299,13 @@ export const getAssistantDashboard = async (req: AuthenticatedRequest, res: Resp
         urgentTasks
       },
 
-      // Existing data
+      
       assignedAssessments,
       studentsSupported,
       upcomingLectures,
       notifications,
 
-      // New detailed data
+      
       workloadBreakdown: {
         assessments: gradingWorkloadByAssessment.map(assessment => ({
           id: assessment.id,
