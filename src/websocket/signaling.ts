@@ -1,60 +1,159 @@
-import { Server as SocketIOServer, Socket } from "socket.io";
+import { Server, Socket } from "socket.io";
+import chalk from "chalk";
+
+const ICE_SERVER_CONFIG = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: "turn:relay1.expressturn.com:3478",  
+      username: "000000002073459740",
+      credential: "2OBO78ET1NTRE0/RJpKJiGovpR4="
+    }
+  ]
+};
+
+interface JoinRoomPayload {
+  roomId: string;
+  userId: string;
+  userName?: string;
+  role?: string;
+}
 
 interface UserState {
   userId: string;
   userName: string;
   socketId: string;
-  role: "teacher" | "student";
+  role: string;
   isMuted: boolean;
   isVideoOff: boolean;
   isScreenSharing: boolean;
   joinedAt: string;
 }
 
-interface Room {
-  id: string;
-  participants: Map<string, UserState>;
-  createdAt: string;
-  iceServers: RTCConfiguration["iceServers"];
+interface SignalingMessage {
+  to: string;
+  from?: string;
+  fromUserId?: string;
+  offer?: RTCSessionDescriptionInit;
+  answer?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
 }
 
-const rooms = new Map<string, Room>();
+export const initWebRTCSignaling = (io: Server) => {
+  const userToSocket = new Map<string, string>();
+  const roomUsers = new Map<string, Map<string, UserState>>();
 
-const defaultIceServers: RTCConfiguration["iceServers"] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-];
+  const getRoomUsers = (roomId: string): Map<string, UserState> => {
+    if (!roomUsers.has(roomId)) {
+      roomUsers.set(roomId, new Map());
+    }
+    return roomUsers.get(roomId)!;
+  };
 
-export const initWebRTCSignaling = (io: SocketIOServer) => {
+  const removeUserFromRoom = (roomId: string, userId: string) => {
+    const users = getRoomUsers(roomId);
+    users.delete(userId);
+    if (users.size === 0) {
+      roomUsers.delete(roomId);
+      console.log(chalk.gray(`Room ${roomId} deleted (empty)`));
+    }
+  };
+
+  const cleanupUserConnections = (userId: string, currentSocketId: string) => {
+    roomUsers.forEach((users, roomId) => {
+      const userState = users.get(userId);
+      if (userState && userState.socketId !== currentSocketId) {
+        users.delete(userId);
+        console.log(chalk.yellow(`Cleaned up old user state for ${userId} in room ${roomId}`));
+      }
+    });
+
+    const existingSocketId = userToSocket.get(userId);
+    if (existingSocketId && existingSocketId !== currentSocketId) {
+      const existingSocket = io.sockets.sockets.get(existingSocketId);
+      if (existingSocket) {
+        console.log(chalk.yellow(`Disconnecting existing connection for user ${userId}`));
+        existingSocket.disconnect(true);
+      }
+    }
+    userToSocket.set(userId, currentSocketId);
+  };
+
+  const broadcastToRoom = (roomId: string, event: string, data: any, excludeSocketId?: string) => {
+    const roomSockets = io.sockets.adapter.rooms.get(roomId);
+    if (!roomSockets) return;
+
+    roomSockets.forEach(socketId => {
+      if (socketId !== excludeSocketId) {
+        const socket = io.sockets.sockets.get(socketId);
+        if (socket) {
+          socket.emit(event, data);
+        }
+      }
+    });
+  };
+
+  const safeEmitTo = (fromSocket: Socket, targetSocketId: string, event: string, payload: any): boolean => {
+    try {
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (!targetSocket) {
+        console.warn(chalk.red(`Target socket ${targetSocketId} not found for event ${event}`));
+        fromSocket.emit("signal-error", {
+          message: "Target user not connected",
+          to: targetSocketId,
+          event,
+          timestamp: new Date().toISOString()
+        });
+        return false;
+      }
+
+      const fromRoomId = fromSocket.data.roomId;
+      const targetRoomId = targetSocket.data.roomId;
+
+      if (fromRoomId && targetRoomId && fromRoomId !== targetRoomId) {
+        console.warn(chalk.yellow(`Room mismatch: ${fromSocket.id} (${fromRoomId}) -> ${targetSocketId} (${targetRoomId})`));
+        return false;
+      }
+
+      targetSocket.emit(event, {
+        ...payload,
+        from: fromSocket.id,
+        fromUserId: fromSocket.data.userId
+      });
+
+      return true;
+    } catch (err) {
+      console.error(chalk.red(`Error emitting ${event} to ${targetSocketId}:`, err));
+      fromSocket.emit("signal-error", {
+        message: "Failed to deliver signal",
+        to: targetSocketId,
+        event,
+        error: err instanceof Error ? err.message : "Unknown error"
+      });
+      return false;
+    }
+  };
+
   io.on("connection", (socket: Socket) => {
-    console.log(`Socket connected: ${socket.id}`);
+    console.log(chalk.green(`Client connected: ${socket.id}`));
+    console.log(chalk.blue(`Origin: ${socket.handshake.headers.origin}`));
 
-    socket.on("join-room", (data: {
-      roomId: string;
-      userId: string;
-      userName: string;
-      role: "teacher" | "student";
-    }) => {
+    socket.on("join-room", async (payload: JoinRoomPayload) => {
       try {
-        const { roomId, userId, userName, role } = data;
+        const { roomId, userId, userName = "User", role = "student" } = payload;
         
-        if (!roomId || !userId || !userName) {
-          socket.emit("signal-error", { message: "Missing required join data" });
-          return;
-        }
+        console.log(chalk.blue(`User ${userId} (${userName}) joining room ${roomId} as ${role}`));
 
-        if (!rooms.has(roomId)) {
-          rooms.set(roomId, {
-            id: roomId,
-            participants: new Map(),
-            createdAt: new Date().toISOString(),
-            iceServers: defaultIceServers,
-          });
-        }
+        socket.data.userId = userId;
+        socket.data.userName = userName;
+        socket.data.role = role;
+        socket.data.roomId = roomId;
 
-        const room = rooms.get(roomId)!;
-        socket.join(roomId);
+        cleanupUserConnections(userId, socket.id);
+
+        await socket.join(roomId);
+
+        const roomUserMap = getRoomUsers(roomId);
 
         const userState: UserState = {
           userId,
@@ -64,296 +163,296 @@ export const initWebRTCSignaling = (io: SocketIOServer) => {
           isMuted: false,
           isVideoOff: false,
           isScreenSharing: false,
-          joinedAt: new Date().toISOString(),
+          joinedAt: new Date().toISOString()
         };
 
-        const existingParticipants = Array.from(room.participants.values());
-        room.participants.set(socket.id, userState);
-
-        socket.emit("room-joined", {
-          participantCount: room.participants.size,
-          participants: Array.from(room.participants.values()),
-          iceServers: room.iceServers,
-        });
+        roomUserMap.set(userId, userState);
 
         socket.to(roomId).emit("user-joined", {
           socketId: socket.id,
           userId,
           userName,
           role,
+          userState
         });
 
-        console.log(`${userName} (${role}) joined room ${roomId}`);
+        socket.emit("room-joined", {
+          roomId,
+          participantCount: roomUserMap.size,
+          participants: Array.from(roomUserMap.values()),
+          iceServers: ICE_SERVER_CONFIG.iceServers
+        });
+
+        console.log(chalk.green(`${role} ${userId} (${userName}) joined room ${roomId}`));
+        console.log(chalk.blue(`Room ${roomId} now has ${roomUserMap.size} participants`));
+
       } catch (error) {
-        console.error("Error joining room:", error);
-        socket.emit("signal-error", { message: "Failed to join room" });
+        console.error(chalk.red(`Error in join-room for ${payload.roomId}:`, error));
+        socket.emit("error", { message: "Failed to join room" });
       }
     });
 
-    socket.on("offer", async (data: {
-      to: string;
-      offer: RTCSessionDescriptionInit;
-    }) => {
+    socket.on("leave-room", ({ roomId, userId }: { roomId: string; userId?: string }) => {
+      try {
+        const userIdToRemove = userId || socket.data.userId;
+        const userName = socket.data.userName || "User";
+        
+        console.log(chalk.yellow(`User ${userIdToRemove} (${userName}) leaving room ${roomId}`));
+
+        socket.leave(roomId);
+        
+        if (userIdToRemove) {
+          userToSocket.delete(userIdToRemove);
+          removeUserFromRoom(roomId, userIdToRemove);
+        }
+
+        socket.to(roomId).emit("user-left", {
+          socketId: socket.id,
+          userId: userIdToRemove,
+        });
+
+        const roomUserMap = getRoomUsers(roomId);
+        socket.to(roomId).emit("participants-updated", {
+          participants: Array.from(roomUserMap.values())
+        });
+
+      } catch (error) {
+        console.error(chalk.red(`Error leaving room:`, error));
+      }
+    });
+
+    socket.on("offer", (data: SignalingMessage) => {
       try {
         const { to, offer } = data;
-        const targetSocket = io.sockets.sockets.get(to);
-        
-        if (targetSocket) {
-          let senderUser: UserState | undefined;
-          for (const room of rooms.values()) {
-            const user = room.participants.get(socket.id);
-            if (user) {
-              senderUser = user;
-              break;
-            }
-          }
+        if (!to || !offer) {
+          console.warn(chalk.yellow(`Invalid offer from ${socket.id}`));
+          return;
+        }
 
-          if (senderUser) {
-            targetSocket.emit("offer", {
-              from: socket.id,
-              fromUserId: senderUser.userId,
-              offer,
-            });
-            console.log(`Offer sent from ${socket.id} to ${to}`);
-          }
-        } else {
-          socket.emit("signal-error", { message: "Target peer not found" });
+        const success = safeEmitTo(socket, to, "offer", { offer });
+        if (success) {
+          console.log(chalk.blue(`Offer: ${socket.data.userId || socket.id} → ${to}`));
         }
       } catch (error) {
-        console.error("Error handling offer:", error);
-        socket.emit("signal-error", { message: "Failed to send offer" });
+        console.error(chalk.red(`Error handling offer:`, error));
       }
     });
 
-    socket.on("answer", (data: {
-      to: string;
-      answer: RTCSessionDescriptionInit;
-    }) => {
+    socket.on("answer", (data: SignalingMessage) => {
       try {
         const { to, answer } = data;
-        const targetSocket = io.sockets.sockets.get(to);
-        
-        if (targetSocket) {
-          let senderUser: UserState | undefined;
-          for (const room of rooms.values()) {
-            const user = room.participants.get(socket.id);
-            if (user) {
-              senderUser = user;
-              break;
-            }
-          }
+        if (!to || !answer) {
+          console.warn(chalk.yellow(`Invalid answer from ${socket.id}`));
+          return;
+        }
 
-          if (senderUser) {
-            targetSocket.emit("answer", {
-              from: socket.id,
-              fromUserId: senderUser.userId,
-              answer,
-            });
-            console.log(`Answer sent from ${socket.id} to ${to}`);
-          }
-        } else {
-          socket.emit("signal-error", { message: "Target peer not found" });
+        const success = safeEmitTo(socket, to, "answer", { answer });
+        if (success) {
+          console.log(chalk.green(`Answer: ${socket.data.userId || socket.id} → ${to}`));
         }
       } catch (error) {
-        console.error("Error handling answer:", error);
-        socket.emit("signal-error", { message: "Failed to send answer" });
+        console.error(chalk.red(`Error handling answer:`, error));
       }
     });
 
-    socket.on("ice-candidate", (data: {
-      to: string;
-      candidate: RTCIceCandidateInit;
-    }) => {
+    socket.on("ice-candidate", (data: SignalingMessage) => {
       try {
         const { to, candidate } = data;
-        const targetSocket = io.sockets.sockets.get(to);
+        if (!to || !candidate) {
+          console.warn(chalk.yellow(`Invalid ICE candidate from ${socket.id}`));
+          return;
+        }
+
+        const success = safeEmitTo(socket, to, "ice-candidate", { candidate });
+        if (success) {
+          console.log(chalk.cyan(`ICE: ${socket.data.userId || socket.id} → ${to}`));
+        }
+      } catch (error) {
+        console.error(chalk.red(`Error handling ICE candidate:`, error));
+      }
+    });
+
+    socket.on("toggle-audio", ({ roomId, isMuted, userId }: { roomId: string; isMuted: boolean; userId?: string }) => {
+      try {
+        const userIdToUpdate = userId || socket.data.userId;
+        const roomUserMap = getRoomUsers(roomId);
+        const userState = roomUserMap.get(userIdToUpdate);
         
+        if (userState) {
+          userState.isMuted = isMuted;
+          console.log(chalk.magenta(`${userState.userName} ${isMuted ? 'muted' : 'unmuted'} audio in ${roomId}`));
+        }
+
+        broadcastToRoom(roomId, "user-toggle-audio", {
+          socketId: socket.id,
+          userId: userIdToUpdate,
+          isMuted
+        }, socket.id);
+
+      } catch (error) {
+        console.error(chalk.red(`Error handling audio toggle:`, error));
+      }
+    });
+
+    socket.on("toggle-video", ({ roomId, isVideoOff, userId }: { roomId: string; isVideoOff: boolean; userId?: string }) => {
+      try {
+        const userIdToUpdate = userId || socket.data.userId;
+        const roomUserMap = getRoomUsers(roomId);
+        const userState = roomUserMap.get(userIdToUpdate);
+        
+        if (userState) {
+          userState.isVideoOff = isVideoOff;
+          console.log(chalk.blue(`${userState.userName} ${isVideoOff ? 'turned off' : 'turned on'} video in ${roomId}`));
+        }
+
+        broadcastToRoom(roomId, "user-toggle-video", {
+          socketId: socket.id,
+          userId: userIdToUpdate,
+          isVideoOff
+        }, socket.id);
+
+      } catch (error) {
+        console.error(chalk.red(`Error handling video toggle:`, error));
+      }
+    });
+
+    socket.on("toggle-screen-share", ({ roomId, isScreenSharing, userId }: { roomId: string; isScreenSharing: boolean; userId?: string }) => {
+      try {
+        const userIdToUpdate = userId || socket.data.userId;
+        const roomUserMap = getRoomUsers(roomId);
+        const userState = roomUserMap.get(userIdToUpdate);
+        
+        if (userState) {
+          userState.isScreenSharing = isScreenSharing;
+          console.log(chalk.bgBlue(`${userState.userName} ${isScreenSharing ? 'started' : 'stopped'} screen sharing in ${roomId}`));
+        }
+
+        broadcastToRoom(roomId, "user-screen-share-toggle", {
+          socketId: socket.id,
+          userId: userIdToUpdate,
+          isSharing: isScreenSharing
+        }, socket.id);
+
+      } catch (error) {
+        console.error(chalk.red(`Error handling screen share toggle:`, error));
+      }
+    });
+
+    socket.on("remove-participant", ({ roomId, participantId, removedBy }) => {
+      try {
+        console.log(`${removedBy} removing participant ${participantId} from room ${roomId}`);
+        
+        const targetSocket = io.sockets.sockets.get(participantId);
         if (targetSocket) {
-          targetSocket.emit("ice-candidate", {
-            from: socket.id,
-            candidate,
-          });
+          targetSocket.leave(roomId);
+          targetSocket.emit("removed-from-lecture", { removedBy });
+          targetSocket.disconnect(true);
         }
-      } catch (error) {
-        console.error("Error handling ICE candidate:", error);
-      }
-    });
-
-    socket.on("toggle-audio", (data: {
-      roomId: string;
-      isMuted: boolean;
-      userId: string;
-    }) => {
-      try {
-        const { roomId, isMuted, userId } = data;
-        const room = rooms.get(roomId);
         
-        if (room) {
-          const user = room.participants.get(socket.id);
-          if (user) {
-            user.isMuted = isMuted;
-            socket.to(roomId).emit("user-toggle-audio", { userId, isMuted });
-          }
-        }
-      } catch (error) {
-        console.error("Error handling audio toggle:", error);
-      }
-    });
-
-    socket.on("toggle-video", (data: {
-      roomId: string;
-      isVideoOff: boolean;
-      userId: string;
-    }) => {
-      try {
-        const { roomId, isVideoOff, userId } = data;
-        const room = rooms.get(roomId);
+        socket.to(roomId).emit("participant-removed", {
+          participantId,
+          removedBy
+        });
         
-        if (room) {
-          const user = room.participants.get(socket.id);
-          if (user) {
-            user.isVideoOff = isVideoOff;
-            socket.to(roomId).emit("user-toggle-video", { userId, isVideoOff });
-          }
+        const roomUserMap = getRoomUsers(roomId);
+        const userToRemove = Array.from(roomUserMap.values()).find(u => u.socketId === participantId);
+        if (userToRemove) {
+          removeUserFromRoom(roomId, userToRemove.userId);
         }
-      } catch (error) {
-        console.error("Error handling video toggle:", error);
-      }
-    });
-
-    socket.on("toggle-screen-share", (data: {
-      roomId: string;
-      isScreenSharing: boolean;
-      userId: string;
-    }) => {
-      try {
-        const { roomId, isScreenSharing, userId } = data;
-        const room = rooms.get(roomId);
         
-        if (room) {
-          const user = room.participants.get(socket.id);
-          if (user) {
-            user.isScreenSharing = isScreenSharing;
-            socket.to(roomId).emit("user-screen-share-toggle", { 
-              userId, 
-              isSharing: isScreenSharing 
-            });
-          }
-        }
-      } catch (error) {
-        console.error("Error handling screen share toggle:", error);
-      }
-    });
-
-    socket.on("remove-participant", (data: {
-      roomId: string;
-      participantId: string;
-      removedBy: string;
-    }) => {
-      try {
-        const { roomId, participantId, removedBy } = data;
-        const room = rooms.get(roomId);
-        
-        if (room) {
-          const remover = room.participants.get(socket.id);
-          if (remover && remover.role === "teacher") {
-            const targetSocket = io.sockets.sockets.get(participantId);
-            if (targetSocket) {
-              targetSocket.leave(roomId);
-              targetSocket.emit("removed-from-room", { roomId, removedBy });
-            }
-            
-            room.participants.delete(participantId);
-            socket.to(roomId).emit("participant-removed", { socketId: participantId });
-            console.log(`Participant ${participantId} removed from ${roomId}`);
-          }
-        }
       } catch (error) {
         console.error("Error removing participant:", error);
       }
     });
 
-    socket.on("end-lecture", (data: { roomId: string }) => {
+    socket.on("disconnecting", (reason) => {
       try {
-        const { roomId } = data;
-        const room = rooms.get(roomId);
-        
-        if (room) {
-          const user = room.participants.get(socket.id);
-          if (user && user.role === "teacher") {
-            socket.to(roomId).emit("lecture-ended");
-            
-            setTimeout(() => {
-              io.in(roomId).socketsLeave(roomId);
-              rooms.delete(roomId);
-              console.log(`Room ${roomId} ended and deleted`);
-            }, 2000);
-          }
-        }
-      } catch (error) {
-        console.error("Error ending lecture:", error);
-      }
-    });
+        const userId = socket.data.userId;
+        const userName = socket.data.userName || "User";
+        const roomId = socket.data.roomId;
 
-    socket.on("leave-room", (data: { roomId: string; userId: string }) => {
-      try {
-        const { roomId, userId } = data;
-        const room = rooms.get(roomId);
+        console.log(chalk.yellow(`User ${userId} (${userName}) disconnecting: ${reason}`));
         
-        if (room) {
-          socket.leave(roomId);
-          room.participants.delete(socket.id);
-          
-          socket.to(roomId).emit("user-left", { 
-            socketId: socket.id, 
-            userId 
+        if (roomId) {
+          if (userId) {
+            removeUserFromRoom(roomId, userId);
+          }
+
+          socket.to(roomId).emit("user-left", {
+            socketId: socket.id,
+            userId: userId,
           });
 
-          if (room.participants.size === 0) {
-            rooms.delete(roomId);
-            console.log(`Empty room ${roomId} deleted`);
+          const roomUserMap = getRoomUsers(roomId);
+          socket.to(roomId).emit("participants-updated", {
+            participants: Array.from(roomUserMap.values())
+          });
+        }
+
+        if (userId) {
+          const mappedSocketId = userToSocket.get(userId);
+          if (mappedSocketId === socket.id) {
+            userToSocket.delete(userId);
           }
         }
+
       } catch (error) {
-        console.error("Error leaving room:", error);
+        console.error(chalk.red(`Error during disconnect cleanup:`, error));
       }
     });
 
     socket.on("disconnect", (reason) => {
-      console.log(`Socket disconnected: ${socket.id}, reason: ${reason}`);
-      
-      for (const [roomId, room] of rooms.entries()) {
-        if (room.participants.has(socket.id)) {
-          const user = room.participants.get(socket.id);
-          room.participants.delete(socket.id);
-          
-          socket.to(roomId).emit("user-left", { 
-            socketId: socket.id, 
-            userId: user?.userId 
-          });
-
-          if (room.participants.size === 0) {
-            rooms.delete(roomId);
-            console.log(`Empty room ${roomId} deleted after disconnect`);
-          }
-          break;
-        }
+      try {
+        const userId = socket.data.userId;
+        const userName = socket.data.userName || "User";
+        console.log(chalk.yellow(`Client disconnected: ${socket.id}, User: ${userId} (${userName}), Reason: ${reason}`));
+      } catch (error) {
+        console.error(chalk.red("Error on disconnect:", error));
       }
     });
 
     socket.on("error", (error) => {
-      console.error(`Socket error for ${socket.id}:`, error);
+      console.log(chalk.red(`Socket error for ${socket.data.userId} (${socket.id}):`, error));
     });
   });
 
   setInterval(() => {
-    const now = Date.now();
-    for (const [roomId, room] of rooms.entries()) {
-      const roomAge = now - new Date(room.createdAt).getTime();
-      if (roomAge > 4 * 60 * 60 * 1000 && room.participants.size === 0) {
-        rooms.delete(roomId);
-        console.log(`Cleaned up old empty room: ${roomId}`);
+    try {
+      const socketRooms = io.sockets.adapter.rooms;
+      const activeRooms = Array.from(socketRooms.entries()).filter(([roomId, sockets]) => {
+        return sockets.size > 0 && !io.sockets.sockets.has(roomId);
+      });
+
+      if (activeRooms.length > 0) {
+        console.log(chalk.gray(`Health Check - Active rooms: ${activeRooms.length}, User states: ${roomUsers.size}`));
+        
+        activeRooms.forEach(([roomId, sockets]) => {
+          const userStates = roomUsers.get(roomId);
+          if (sockets.size !== userStates?.size) {
+            console.log(chalk.yellow(`Room ${roomId} inconsistency: ${sockets.size} sockets vs ${userStates?.size || 0} user states`));
+          }
+        });
+
+        roomUsers.forEach((users, roomId) => {
+          if (users.size === 0) {
+            roomUsers.delete(roomId);
+            console.log(chalk.gray(`Cleaned up empty room: ${roomId}`));
+          }
+        });
       }
+
+      const totalConnections = io.sockets.sockets.size;
+      const totalRooms = activeRooms.length;
+      const totalUsers = Array.from(roomUsers.values()).reduce((sum, users) => sum + users.size, 0);
+
+      if (totalConnections > 0) {
+        console.log(chalk.gray(`Stats: ${totalConnections} connections, ${totalRooms} rooms, ${totalUsers} active users`));
+      }
+
+    } catch (error) {
+      console.error(chalk.red("Error in periodic cleanup:", error));
     }
-  }, 30 * 60 * 1000);
+  }, 30000);
+
+  console.log(chalk.green("WebRTC signaling server initialized"));
 };
