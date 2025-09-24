@@ -371,33 +371,41 @@ export const initWebRTCSignaling = (io: Server) => {
         const userName = socket.data.userName || "User";
         const roomId = socket.data.roomId;
 
-        console.log(chalk.yellow(`User ${userId} (${userName}) disconnecting: ${reason}`));
+        console.log(chalk.yellow(`User ${userId} (${userName}) disconnecting from room ${roomId}: ${reason}`));
         
         if (roomId) {
-          if (userId) {
-            removeUserFromRoom(roomId, userId);
-          }
-
+          // Notify other participants immediately about the disconnection
           socket.to(roomId).emit("user-left", {
             socketId: socket.id,
             userId: userId,
+            reason: reason
           });
 
-          const roomUserMap = getRoomUsers(roomId);
-          socket.to(roomId).emit("participants-updated", {
-            participants: Array.from(roomUserMap.values())
-          });
+          // Clean up user from room
+          if (userId) {
+            removeUserFromRoom(roomId, userId);
+            
+            // Update participants list for remaining users
+            const roomUserMap = getRoomUsers(roomId);
+            socket.to(roomId).emit("participants-updated", {
+              participants: Array.from(roomUserMap.values())
+            });
+            
+            console.log(chalk.blue(`Room ${roomId} now has ${roomUserMap.size} participants after ${userName} left`));
+          }
         }
 
+        // Clean up user mapping
         if (userId) {
           const mappedSocketId = userToSocket.get(userId);
           if (mappedSocketId === socket.id) {
             userToSocket.delete(userId);
+            console.log(chalk.gray(`Cleaned up user mapping for ${userId}`));
           }
         }
 
       } catch (error) {
-        console.error(chalk.red(`Error during disconnect cleanup:`, error));
+        console.error(chalk.red(`Error during disconnect cleanup for ${socket.id}:`, error));
       }
     });
 
@@ -405,9 +413,35 @@ export const initWebRTCSignaling = (io: Server) => {
       try {
         const userId = socket.data.userId;
         const userName = socket.data.userName || "User";
-        console.log(chalk.yellow(`Client disconnected: ${socket.id}, User: ${userId} (${userName}), Reason: ${reason}`));
+        const roomId = socket.data.roomId;
+        
+        console.log(chalk.yellow(`Client disconnected: ${socket.id}, User: ${userId} (${userName}), Room: ${roomId}, Reason: ${reason}`));
+        
+        // Double-check cleanup in case disconnecting event didn't fire properly
+        if (roomId && userId) {
+          const roomUserMap = getRoomUsers(roomId);
+          const userStillInRoom = roomUserMap.has(userId);
+          
+          if (userStillInRoom) {
+            console.log(chalk.yellow(`User ${userId} still in room after disconnect, performing cleanup`));
+            
+            removeUserFromRoom(roomId, userId);
+            
+            // Notify remaining participants
+            socket.to(roomId).emit("user-left", {
+              socketId: socket.id,
+              userId: userId,
+              reason: `disconnect-${reason}`
+            });
+            
+            socket.to(roomId).emit("participants-updated", {
+              participants: Array.from(roomUserMap.values())
+            });
+          }
+        }
+        
       } catch (error) {
-        console.error(chalk.red("Error on disconnect:", error));
+        console.error(chalk.red(`Error on disconnect for ${socket.id}:`, error));
       }
     });
 
@@ -416,43 +450,128 @@ export const initWebRTCSignaling = (io: Server) => {
     });
   });
 
+  // Enhanced periodic cleanup and health monitoring
   setInterval(() => {
     try {
       const socketRooms = io.sockets.adapter.rooms;
+      const connectedSocketIds = Array.from(io.sockets.sockets.keys());
+      
+      // Find active rooms (rooms that are not just socket IDs)
       const activeRooms = Array.from(socketRooms.entries()).filter(([roomId, sockets]) => {
         return sockets.size > 0 && !io.sockets.sockets.has(roomId);
       });
 
       if (activeRooms.length > 0) {
-        console.log(chalk.gray(`Health Check - Active rooms: ${activeRooms.length}, User states: ${roomUsers.size}`));
+        console.log(chalk.gray(`Health Check - Active rooms: ${activeRooms.length}, User states tracked: ${roomUsers.size}, Connected sockets: ${connectedSocketIds.length}`));
         
+        // Check for inconsistencies between socket rooms and user states
         activeRooms.forEach(([roomId, sockets]) => {
           const userStates = roomUsers.get(roomId);
-          if (sockets.size !== userStates?.size) {
-            console.log(chalk.yellow(`Room ${roomId} inconsistency: ${sockets.size} sockets vs ${userStates?.size || 0} user states`));
-          }
-        });
-
-        roomUsers.forEach((users, roomId) => {
-          if (users.size === 0) {
-            roomUsers.delete(roomId);
-            console.log(chalk.gray(`Cleaned up empty room: ${roomId}`));
+          const socketCount = sockets.size;
+          const userStateCount = userStates?.size || 0;
+          
+          if (socketCount !== userStateCount) {
+            console.log(chalk.yellow(`Room ${roomId} inconsistency: ${socketCount} sockets vs ${userStateCount} user states`));
+            
+            // Clean up disconnected users from user states
+            if (userStates) {
+              const socketsInRoom = Array.from(sockets);
+              const usersToRemove: string[] = [];
+              
+              userStates.forEach((userState, userId) => {
+                if (!socketsInRoom.includes(userState.socketId)) {
+                  console.log(chalk.yellow(`User ${userId} (${userState.socketId}) not in socket room ${roomId}, removing from user states`));
+                  usersToRemove.push(userId);
+                }
+              });
+              
+              usersToRemove.forEach(userId => {
+                userStates.delete(userId);
+              });
+              
+              // If room is now empty, clean it up
+              if (userStates.size === 0) {
+                roomUsers.delete(roomId);
+                console.log(chalk.gray(`Cleaned up empty room: ${roomId}`));
+              }
+            }
           }
         });
       }
 
+      // Clean up completely empty rooms from user states
+      const roomsToDelete: string[] = [];
+      roomUsers.forEach((users, roomId) => {
+        if (users.size === 0) {
+          roomsToDelete.push(roomId);
+        } else {
+          // Also check if any users in this room have disconnected sockets
+          const usersToRemove: string[] = [];
+          users.forEach((userState, userId) => {
+            if (!io.sockets.sockets.has(userState.socketId)) {
+              console.log(chalk.yellow(`Socket ${userState.socketId} for user ${userId} no longer exists, removing from room ${roomId}`));
+              usersToRemove.push(userId);
+            }
+          });
+          
+          usersToRemove.forEach(userId => {
+            const userState = users.get(userId);
+            users.delete(userId);
+            
+            // Notify remaining users in the room about the cleanup
+            if (userState) {
+              const remainingSockets = Array.from(users.values()).map(u => u.socketId);
+              remainingSockets.forEach(socketId => {
+                const socket = io.sockets.sockets.get(socketId);
+                if (socket) {
+                  socket.emit("user-left", {
+                    socketId: userState.socketId,
+                    userId: userId,
+                    reason: "cleanup-disconnected"
+                  });
+                }
+              });
+            }
+          });
+          
+          if (users.size === 0) {
+            roomsToDelete.push(roomId);
+          }
+        }
+      });
+      
+      roomsToDelete.forEach(roomId => {
+        roomUsers.delete(roomId);
+        console.log(chalk.gray(`Cleaned up empty room: ${roomId}`));
+      });
+
+      // Clean up orphaned user-to-socket mappings
+      const usersToRemoveFromMapping: string[] = [];
+      userToSocket.forEach((socketId, userId) => {
+        if (!io.sockets.sockets.has(socketId)) {
+          console.log(chalk.yellow(`Socket ${socketId} for user ${userId} no longer exists, removing from user mapping`));
+          usersToRemoveFromMapping.push(userId);
+        }
+      });
+      
+      usersToRemoveFromMapping.forEach(userId => {
+        userToSocket.delete(userId);
+      });
+
+      // Log current statistics
       const totalConnections = io.sockets.sockets.size;
       const totalRooms = activeRooms.length;
       const totalUsers = Array.from(roomUsers.values()).reduce((sum, users) => sum + users.size, 0);
+      const userMappings = userToSocket.size;
 
       if (totalConnections > 0) {
-        console.log(chalk.gray(`Stats: ${totalConnections} connections, ${totalRooms} rooms, ${totalUsers} active users`));
+        console.log(chalk.gray(`Health Stats: ${totalConnections} connections, ${totalRooms} active rooms, ${totalUsers} active users, ${userMappings} user mappings`));
       }
 
     } catch (error) {
       console.error(chalk.red("Error in periodic cleanup:", error));
     }
-  }, 30000);
+  }, 15000); // Run every 15 seconds for more thorough monitoring
 
   console.log(chalk.green("WebRTC signaling server initialized"));
 };
