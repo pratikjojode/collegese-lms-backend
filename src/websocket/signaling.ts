@@ -212,8 +212,20 @@ export const initWebRTCSignaling = (io: Server) => {
         });
 
         const roomUserMap = getRoomUsers(roomId);
+        
+        // 🔧 CRITICAL FIX: Broadcast correct participant count to all remaining users
+        const participantCount = roomUserMap.size;
+        console.log(chalk.blue(`Room ${roomId} participant count: ${participantCount} after ${userName} left`));
+        
         socket.to(roomId).emit("participants-updated", {
-          participants: Array.from(roomUserMap.values())
+          participants: Array.from(roomUserMap.values()),
+          participantCount: participantCount
+        });
+        
+        // Also emit a specific count update event
+        socket.to(roomId).emit("participant-count-updated", {
+          count: participantCount,
+          reason: "user-left"
         });
 
       } catch (error) {
